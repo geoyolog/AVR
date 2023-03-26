@@ -58,6 +58,7 @@ void port_init()
 	PORTC = 0b00000000;		// ustawienie portu C -
 	DDRD  = 0b10000000;		// ustawienie portu D - 3 jako wyjscia
 	PORTD = 0b0000000;		// ustawienie portu D -
+	
 	}
 
 void LCD_START()
