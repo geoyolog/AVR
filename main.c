@@ -6,9 +6,11 @@
 // Maksymalna ilosc wyswietlanych - 9.
 //
 // Adres EXPANDERA zmien wg konfiguracji sprzetowej w lcd44780.h
+// Pin i port podlaczenia magistrali 1-wire zmień w onewire.h
+// Pin i port podlaczenia triggera (u-switch lub TTP226 lub inne) zmien w konfiguracji ponizej
+// Wyzwalanie triggera stanem wysokim
 //
-// Program nie używa timerów sprzetowych aby
-// latwo przeniesc go na dowolny mikrokontroler.
+// Program nie używa timerów sprzetowych aby latwo przeniesc go na dowolny mikrokontroler.
 
 //		chip: ATMega16
 //		freq: 2.000 MHz int
@@ -29,16 +31,13 @@
 #include "LCD/lcd44780.h"
 #include "1Wire/ds18x20.h"
 
-#define LEDTEST_PIN (1<<7)
-#define LEDTEST_PORT PORTD
+#define LEDTEST_PIN (1<<7)		// pin podlaczenia diody
+#define LEDTEST_PORT PORTD		// port podlaczenia diody
 #define LEDTEST_ON  LEDTEST_PORT |=  LEDTEST_PIN
 #define LEDTEST_OFF LEDTEST_PORT &= ~LEDTEST_PIN
 
-#define KEY_PIN (1<<0)
-#define KEY_PORT PORTA
-
-#define DS_PIN (1<<2)
-#define DS_PORT PORTC
+#define KEY_PIN (1<<0)			// pin podlaczenia triggera
+#define KEY_PORT PORTA			// port podlaczenia triggera
 
 //	------------------ definicja zmiennych i wartosci ------------------------------
 uint8_t subzero, cel, cel_fract_bits; // zmienne do temperatury: minus, stopnie, dziecietne-stopni
@@ -48,6 +47,13 @@ uint8_t temp_meas[MAXSENSORS][3];	// tablica z temperaturami odczytanymi
 char temp_id[MAXSENSORS][8];		// tablica ze znalezionymi identyfikatorami sensorow
 
 uint8_t bounce = 50;				// czas oczekiwania w ms na wygaszenie drgan klawisza, zalecane 50 dla mikroswitch, dla TTP223 może być 1 (0 nie jest obsługiwane przez _delay_ms)
+
+uint8_t tryb = 0;					// zmienna sterująca aktualnym trybem
+	// 0 - po uruchomieniu, reset czujnik_cur do 0
+	// 1 - uruchomienie testera, wyszukiwanie czujnikow, pomiar i zapis tablicy, informacja o ilosci wykrytych
+	// 2 - wyswietlanie, zmiana czujnik_cur na wieksza od 1
+	// 3 - zakonczenie lub informacja o zbyt duzej ilosci czujnikow, po wyjsciu zmiana na tryb = 0
+uint8_t czujnik_cur = 0;					// zmienna przechowujaca numer aktualnie prezentowanego czujnika
 
 //	------------------ definicja portow i kierunkow --------------------------------
 void port_init()
@@ -71,18 +77,63 @@ void LCD_START()
 	lcd_str("Nacisnij klawisz");
 }
 
-void WYSWIETLANIE()
+//	------------------ program testujacy DS18x20 ------------------------------------------
+void TESTER()
 {
+	LEDTEST_ON;
+
 	lcd_cls();
 	lcd_locate(0,0);
-	lcd_str("Wykryto: ");
-	if(czujniki_cnt>9)
-		lcd_str("ponad 9");
-	else
-		lcd_int(czujniki_cnt);
-	lcd_locate(1,0);
-	lcd_str("Nacisnij klawisz");
+	lcd_str("WYSZUKIWANIE...");
 
+	uint8_t *cl=(uint8_t*)gSensorIDs;	// pobieramy wskaznik do tablicy adresow czujnikow
+	for( uint8_t i=0; i<MAXSENSORS*OW_ROMCODE_SIZE; i++)
+		*cl++ = 0; // kasujemy cala tablice
+	czujniki_cnt = search_sensors();	// ponownie wykrywamy ile jest czujnikow i zapelniamy tablice
+
+	_delay_ms(750);
+	DS18X20_start_meas( DS18X20_POWER_EXTERN, NULL );
+
+	_delay_ms(750);
+	if( DS18X20_OK == DS18X20_read_meas(gSensorIDs[0], &subzero, &cel, &cel_fract_bits) )
+		{
+		for(uint8_t i=0;i<MAXSENSORS;i++)
+			{
+			if( DS18X20_OK == DS18X20_read_meas(gSensorIDs[i], &subzero, &cel, &cel_fract_bits) )
+				{
+				for(uint8_t ai=0; ai<8; ai++)
+					{
+					temp_id[i][ai] = gSensorIDs[i][ai];	// zapis id odczytanego termometru
+					}
+				temp_meas[i][0] = subzero;	// zapis temperatury do tablicy temperatur
+				temp_meas[i][1] = cel;
+				temp_meas[i][2] = cel_fract_bits;
+				}
+			}
+		lcd_cls();
+		lcd_locate(0,0);
+		lcd_str("Wykryto: ");
+		if(czujniki_cnt>9)
+			lcd_str("ponad 9");
+		else
+			lcd_int(czujniki_cnt);
+		lcd_locate(1,0);
+		lcd_str("Nacisnij klawisz");
+		}
+	else
+		{
+		lcd_cls();
+		lcd_locate(0,0);
+		lcd_str(" BRAK LUB BLAD  ");
+		lcd_locate(1,0);
+		lcd_str("   CZUJNIKOW    ");
+		tryb = 0;						// zerowanie trybu - wymuszenie rozpoczecia testu od poczatku
+		}
+	LEDTEST_OFF;
+	}
+
+void WYSWIETLANIE()
+{
 	for(int i=0; i<czujniki_cnt; i++)
 	{
 		while(!(PINA & (1<<PA0)))	{}
@@ -140,60 +191,34 @@ void WYSWIETLANIE()
 	lcd_str("Zakonczono TEST");
 }
 
-//	------------------ program testujacy DS18x20 ------------------------------------------
-void TESTER()
+void TRYB_ZMIANA()
 {
-	LEDTEST_ON;
-
-	lcd_cls();
-	lcd_locate(0,0);
-	lcd_str("WYSZUKIWANIE...");
-
-	uint8_t *cl=(uint8_t*)gSensorIDs;	// pobieramy wskaznik do tablicy adresow czujnikow
-	for( uint8_t i=0; i<MAXSENSORS*OW_ROMCODE_SIZE; i++)
-		*cl++ = 0; // kasujemy cala tablice
-	czujniki_cnt = search_sensors();	// ponownie wykrywamy ile jest czujnikow i zapelniamy tablice
-
-	_delay_ms(750);
-	DS18X20_start_meas( DS18X20_POWER_EXTERN, NULL );
-
-	_delay_ms(750);
-	if( DS18X20_OK == DS18X20_read_meas(gSensorIDs[0], &subzero, &cel, &cel_fract_bits) )
-		{
-		for(uint8_t i=0;i<MAXSENSORS;i++)
-			{
-			if( DS18X20_OK == DS18X20_read_meas(gSensorIDs[i], &subzero, &cel, &cel_fract_bits) )
-				{
-				for(uint8_t ai=0; ai<8; ai++)
-					{
-					temp_id[i][ai] = gSensorIDs[i][ai];	// zapis id odczytanego termometru
-					}
-				temp_meas[i][0] = subzero;	// zapis temperatury do tablicy temperatur
-				temp_meas[i][1] = cel;
-				temp_meas[i][2] = cel_fract_bits;
-				}
-			}
-		}
-	else
-		{
-		lcd_cls();
-		lcd_locate(0,0);
-		lcd_str(" BRAK LUB BLAD  ");
-		lcd_locate(1,0);
-		lcd_str("   CZUJNIKOW    ");
-		}
-
-	LEDTEST_OFF;
-
-	WYSWIETLANIE();
+	switch(tryb)
+	{
+		case 0:
+			tryb++;
+			czujnik_cur = 0;
+			LCD_START();
+			break;
+		case 1:
+			tryb++;
+			TESTER();
+			break;
+		case 2:
+			WYSWIETLANIE();
+		default:
+			tryb = 0;
+			break;
 	}
+}
 
 //	------------------ program glowny ----------------------------------------------
 int main(void)
 {
 	port_init();
 	lcd_init();
-	LCD_START();
+
+	TRYB_ZMIANA();	// wyswietlenie pierwszego "0" przypadku stanu testera - ekran poczatkowy
 
 // ------------------ petla glowna ----------------------------------------------
 while(1)
@@ -203,7 +228,7 @@ while(1)
 			_delay_ms(bounce);
 			while(!(PINA & (1<<PA0)))	{}
 			_delay_ms(bounce);
-			TESTER();
+			TRYB_ZMIANA();
 		}
 
 	} // koniec WHILE(1)
