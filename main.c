@@ -217,7 +217,6 @@ int main(void)
 {
 	port_init();
 	lcd_init();
-
 	TRYB_ZMIANA();	// wyswietlenie pierwszego "0" przypadku stanu testera - ekran poczatkowy
 
 // ------------------ petla glowna ----------------------------------------------
